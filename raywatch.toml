@@ -1,0 +1,35 @@
+# raywatch example configuration.
+
+[server]
+bind = "127.0.0.1"
+port = 8090
+db = "./raywatch.db"
+# webhook = "https://hooks.example.com/notify"   # POST JSON on state change
+
+[check.web]
+type = "http"
+target = "https://example.com/"
+interval_ms = 15000
+timeout_ms = 5000
+expect_status = 200
+
+[check.tls]
+type = "tls"
+target = "example.com:443"
+interval_ms = 60000
+
+[check.ssh]
+type = "tcp"
+target = "127.0.0.1:22"
+interval_ms = 30000
+
+[check.cache]
+type = "redis"
+target = "127.0.0.1:6379"
+interval_ms = 10000
+
+# dns rides blocking UDP (see README): reliable resolvers only.
+[check.dns]
+type = "dns"
+target = "example.com@8.8.8.8:53"
+interval_ms = 60000

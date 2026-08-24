@@ -1,0 +1,123 @@
+// raywatch — one probe per check type.
+//
+// tls: a successful rustls handshake already validates the chain AND the
+// dates, so "handshake ok" is the check — but days-to-expiry is impossible:
+// std/net does not expose the peer certificate (recorded finding).
+// dns: net/dns rides UDP, whose recv BLOCKS every fiber and has no timeout
+// (recorded finding) — a lost packet stalls the whole monitor, so use dns
+// checks against reliable resolvers only.
+import std/net;
+import std/time;
+import net/http;
+import net/redis;
+import net/dns;
+import config;
+
+pub struct Outcome {
+    ok: bool,
+    latency_ms: int,
+    detail: string,
+}
+
+fn outcome(ok: bool, started: int, detail: string) -> Outcome {
+    Outcome { ok: ok, latency_ms: time.monotonic() - started, detail: detail }
+}
+
+fn check_http(c: config.Check) -> Outcome {
+    let t0 = time.monotonic();
+    match (http.request_bytes("GET", c.target, b"", Map.new(), c.timeout_ms)) {
+        Result.Ok(r) => {
+            if (r.status == c.expect_status) {
+                outcome(true, t0, "HTTP " + to_string(r.status))
+            } else {
+                outcome(
+                    false,
+                    t0,
+                    "HTTP " + to_string(r.status) + " (expected " + to_string(c.expect_status) + ")"
+                )
+            }
+        },
+        Result.Err(e) => outcome(false, t0, e),
+    }
+}
+
+fn check_tcp(c: config.Check) -> Outcome {
+    let t0 = time.monotonic();
+    let (host, port) = config.host_port(c.target, 0);
+    match (net.tcp_connect(host, port)) {
+        Result.Ok(h) => {
+            close(h);
+            outcome(true, t0, "connected")
+        },
+        Result.Err(e) => outcome(false, t0, e),
+    }
+}
+
+fn check_tls(c: config.Check) -> Outcome {
+    let t0 = time.monotonic();
+    let (host, port) = config.host_port(c.target, 443);
+    match (net.tls_connect(host, port)) {
+        Result.Ok(h) => {
+            close(h);
+            outcome(true, t0, "handshake ok (chain + dates valid)")
+        },
+        Result.Err(e) => outcome(false, t0, e),
+    }
+}
+
+fn check_redis(c: config.Check) -> Outcome {
+    let t0 = time.monotonic();
+    let (host, port) = config.host_port(c.target, 6379);
+    match (redis.connect(host, port)) {
+        Result.Err(e) => outcome(false, t0, e),
+        Result.Ok(conn) => {
+            let r = redis.command(conn, ["PING"]);
+            redis.close_conn(conn);
+            match (r) {
+                Result.Ok(reply) => {
+                    let s = redis.reply_str(reply);
+                    outcome(s == "PONG", t0, s)
+                },
+                Result.Err(e) => outcome(false, t0, e),
+            }
+        },
+    }
+}
+
+// dns target: "name@server:port" (e.g. "example.com@8.8.8.8:53").
+fn check_dns(c: config.Check) -> Outcome {
+    let t0 = time.monotonic();
+    match (c.target.index_of("@")) {
+        Option.None => outcome(false, t0, "dns target must be name@server:port"),
+        Option.Some(i) => {
+            let name = c.target.substring(0, i);
+            let (server, port) = config.host_port(c.target.substring(i + 1, c.target.len()), 53);
+            match (dns.query_a(server, port, name)) {
+                Result.Ok(addrs) => {
+                    if (addrs.len() > 0) {
+                        outcome(true, t0, join(addrs, ","))
+                    } else {
+                        outcome(false, t0, "no A records")
+                    }
+                },
+                Result.Err(e) => outcome(false, t0, e),
+            }
+        },
+    }
+}
+
+pub fn run(c: config.Check) -> Outcome {
+    if (c.kind == "http") {
+        check_http(c)
+    } else if (c.kind == "tcp") {
+        check_tcp(c)
+    } else if (c.kind == "tls") {
+        check_tls(c)
+    } else if (c.kind == "redis") {
+        check_redis(c)
+    } else if (c.kind == "dns") {
+        check_dns(c)
+    } else {
+        Outcome { ok: false, latency_ms: 0, detail: "unknown check type" }
+    }
+}

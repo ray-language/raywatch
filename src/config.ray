@@ -1,0 +1,117 @@
+// raywatch — TOML config: named check tables (std/toml has no [[array of
+// tables]] — same shape as raygate).
+import std/toml;
+from std/toml import TomlValue, TomlEntry;
+
+pub struct Check {
+    name: string,
+    kind: string,
+    target: string,
+    interval_ms: int,
+    timeout_ms: int,
+    expect_status: int,
+}
+
+pub struct Config {
+    port: int,
+    bind: string,
+    db_path: string,
+    webhook: string,
+    checks: [Check],
+}
+
+fn get_str(entries: [TomlEntry], key: string, fallback: string) -> string {
+    match (toml.toml_get(entries, key)) {
+        Option.Some(v) => {
+            match (v) {
+                TomlValue.TStr(s) => s,
+                _ => fallback,
+            }
+        },
+        Option.None => fallback,
+    }
+}
+
+fn get_int(entries: [TomlEntry], key: string, fallback: int) -> int {
+    match (toml.toml_get(entries, key)) {
+        Option.Some(v) => {
+            match (v) {
+                TomlValue.TInt(n) => n,
+                _ => fallback,
+            }
+        },
+        Option.None => fallback,
+    }
+}
+
+fn check_names(entries: [TomlEntry]) -> [string] {
+    var names: [string] = [];
+    for e in entries {
+        if (e.key.starts_with("check.")) {
+            let rest = e.key.substring(6, e.key.len());
+            match (rest.index_of(".")) {
+                Option.Some(dot) => {
+                    let name = rest.substring(0, dot);
+                    if (!names.contains(name)) {
+                        names.push(name);
+                    }
+                },
+                Option.None => { },
+            }
+        }
+    }
+    names
+}
+
+pub fn parse_config(src: string) -> Result<Config, string> {
+    let entries = toml.parse_toml(src)?;
+    var checks: [Check] = [];
+    for name in check_names(entries) {
+        let base = "check." + name + ".";
+        let kind = get_str(entries, base + "type", "");
+        let target = get_str(entries, base + "target", "");
+        if (kind == "" || target == "") {
+            return Result.Err("check '" + name + "': needs 'type' and 'target'");
+        }
+        if (kind != "http" && kind != "tcp" && kind != "tls" && kind != "dns" && kind != "redis") {
+            return Result.Err("check '" + name + "': unknown type '" + kind + "'");
+        }
+        checks.push(
+            Check {
+                name: name,
+                kind: kind,
+                target: target,
+                interval_ms: get_int(entries, base + "interval_ms", 10000),
+                timeout_ms: get_int(entries, base + "timeout_ms", 5000),
+                expect_status: get_int(entries, base + "expect_status", 200)
+            }
+        );
+    }
+    if (checks.len() == 0) {
+        return Result.Err("no checks: add at least one [check.<name>] table");
+    }
+    Result.Ok(
+        Config {
+            port: get_int(entries, "server.port", 8090),
+            bind: get_str(entries, "server.bind", "127.0.0.1"),
+            db_path: get_str(entries, "server.db", "./raywatch.db"),
+            webhook: get_str(entries, "server.webhook", ""),
+            checks: checks
+        }
+    )
+}
+
+// "host:port" → (host, port); fallback used when there is no colon.
+pub fn host_port(target: string, fallback_port: int) -> (string, int) {
+    match (target.index_of(":")) {
+        Option.Some(i) => {
+            let port = match (parse_int(target.substring(i + 1, target.len()))) {
+                Option.Some(n) => n,
+                Option.None => fallback_port,
+            };
+            return (target.substring(0, i), port);
+        },
+        Option.None => { },
+    }
+    return (target, fallback_port);
+}

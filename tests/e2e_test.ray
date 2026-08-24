@@ -1,0 +1,168 @@
+// End-to-end: a healthy upstream, a dead port, a webhook sink and the
+// dashboard, all live in fibers. One @test (zombie listeners).
+import std/fs;
+import std/time;
+import std/json;
+import net/http;
+import net/webserver;
+import config;
+import checks;
+import recorder;
+import web;
+import main;
+
+const UP_PORT: int = 19001;
+
+const HOOK_PORT: int = 19002;
+
+const DASH_PORT: int = 19003;
+
+const CFG: string = `
+[server]
+bind = "127.0.0.1"
+port = 19003
+db = "/tmp/raywatch_e2e.db"
+webhook = "http://127.0.0.1:19002/alert"
+
+[check.vivo]
+type = "http"
+target = "http://127.0.0.1:19001/health"
+interval_ms = 300
+timeout_ms = 1000
+
+[check.muerto]
+type = "tcp"
+target = "127.0.0.1:19099"
+interval_ms = 300
+
+[check.puerta]
+type = "tcp"
+target = "127.0.0.1:19001"
+interval_ms = 300
+`;
+
+fn upstream(req: webserver.Request) -> webserver.Response {
+    webserver.ok("ok")
+}
+
+@test
+fn monitor_end_to_end() {
+    fs.remove_file("/tmp/raywatch_e2e.db");
+    // Webhook sink: records the alert bodies it receives.
+    let hooks: Channel<string> = Channel.bounded(16);
+    spawn(fn() {
+        webserver.serve("127.0.0.1", HOOK_PORT, fn(req: webserver.Request) -> webserver.Response {
+            match (from_utf8(req.body)) {
+                Result.Ok(s) => {
+                    send(hooks, s);
+                },
+                Result.Err(e) => { },
+            }
+            webserver.ok("gracias")
+        });
+    });
+    spawn(fn() {
+        webserver.serve("127.0.0.1", UP_PORT, upstream);
+    });
+    let cfg = match (config.parse_config(CFG)) {
+        Result.Ok(c) => c,
+        Result.Err(e) => panic(e),
+    };
+    assert_eq(cfg.checks.len(), 3);
+    let rec = match (recorder.start(cfg)) {
+        Result.Ok(r) => r,
+        Result.Err(e) => panic(e),
+    };
+    main.start_checks(cfg, rec);
+    spawn(fn() {
+        webserver.serve("127.0.0.1", DASH_PORT, fn(req: webserver.Request) -> webserver.Response {
+            web.handle(rec, req)
+        });
+    });
+    time.sleep(800);
+
+    // Snapshot: vivo/puerta UP, muerto DOWN, uptime > 0.
+    let status = match (http.fetch("http://127.0.0.1:" + to_string(DASH_PORT) + "/api/status")) {
+        Result.Ok(r) => {
+            match (from_utf8(r.body)) {
+                Result.Ok(s) => s,
+                Result.Err(e) => panic(e),
+            }
+        },
+        Result.Err(e) => panic(e),
+    };
+    let j = match (json.parse(status)) {
+        Result.Ok(x) => x,
+        Result.Err(e) => panic(e + ": " + status),
+    };
+    var seen_vivo = false;
+    var seen_muerto = false;
+    match (json.as_array(j)) {
+        Option.Some(items) => {
+            assert_eq(items.len(), 3);
+            for it in items {
+                let name = match (json.get_string(it, "name")) {
+                    Option.Some(s) => s,
+                    Option.None => "",
+                };
+                let ok = match (json.get_bool(it, "ok")) {
+                    Option.Some(b) => b,
+                    Option.None => false,
+                };
+                if (name == "vivo") {
+                    seen_vivo = true;
+                    assert(ok);
+                }
+                if (name == "muerto") {
+                    seen_muerto = true;
+                    assert(!ok);
+                }
+            }
+        },
+        Option.None => panic("expected array: " + status),
+    }
+    assert(seen_vivo);
+    assert(seen_muerto);
+
+    // The dashboard page and the SSE stream answer.
+    match (http.fetch("http://127.0.0.1:" + to_string(DASH_PORT) + "/")) {
+        Result.Ok(r) => {
+            assert_eq(r.status, 200);
+            match (from_utf8(r.body)) {
+                Result.Ok(s) => assert(s.contains("raywatch")),
+                Result.Err(e) => panic(e),
+            }
+        },
+        Result.Err(e) => panic(e),
+    }
+
+    // Webhooks fired for the initial state changes (first report of each
+    // check counts as a change).
+    var alerts = 0;
+    var draining = true;
+    while (draining) {
+        let chans = [hooks];
+        // recv would block: rely on the buffered backlog only.
+        if (alerts >= 3) {
+            draining = false;
+        } else {
+            match (recv(hooks)) {
+                Option.Some(body) => {
+                    assert(body.contains("\"name\""));
+                    alerts = alerts + 1;
+                },
+                Option.None => {
+                    draining = false;
+                },
+            }
+        }
+    }
+    assert_eq(alerts, 3);
+
+    // History landed in SQLite (each check ran at least twice).
+    match (http.fetch("http://127.0.0.1:" + to_string(DASH_PORT) + "/api/status")) {
+        Result.Ok(r) => assert_eq(r.status, 200),
+        Result.Err(e) => panic(e),
+    }
+    assert(fs.exists("/tmp/raywatch_e2e.db"));
+}

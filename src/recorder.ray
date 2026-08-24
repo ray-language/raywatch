@@ -1,0 +1,158 @@
+// raywatch — the recorder actor: SQLite history, current state, SSE fan-out
+// and webhook alerts on state CHANGES (not on every failure).
+import std/time;
+import std/json;
+from std/json import Json;
+import db/sqlite;
+import net/http;
+import config;
+
+pub struct Sample {
+    name: string,
+    ok: bool,
+    latency_ms: int,
+    detail: string,
+}
+
+pub enum Rec {
+    Report(Sample),
+    Sse(Channel<bytes>),
+    Snapshot(Channel<string>),
+}
+
+struct State {
+    ok: bool,
+    since_ms: int,
+    latency_ms: int,
+    detail: string,
+    total: int,
+    passed: int,
+}
+
+pub fn start(cfg: config.Config) -> Result<Channel<Rec>, string> {
+    let conn = sqlite.connect(cfg.db_path)?;
+    sqlite.exec(
+        conn,
+        "CREATE TABLE IF NOT EXISTS results (name TEXT, ts INTEGER, ok INTEGER, latency INTEGER, detail TEXT)",
+        []
+    )?;
+    let ch: Channel<Rec> = Channel.bounded(256);
+    spawn(fn() {
+        actor_loop(ch, conn, cfg);
+    });
+    Result.Ok(ch)
+}
+
+fn sample_json(s: Sample, st: State) -> Json {
+    var m: Map<string, Json> = Map.new();
+    m.insert("name", Json.JStr(s.name));
+    m.insert("ok", Json.JBool(s.ok));
+    m.insert("latency_ms", Json.JNum(s.latency_ms as float));
+    m.insert("detail", Json.JStr(s.detail));
+    m.insert("since_ms", Json.JNum(st.since_ms as float));
+    let uptime = if (st.total > 0) { st.passed * 10000 / st.total } else { 0 };
+    m.insert("uptime_pct", Json.JNum(uptime as float / 100.0));
+    Json.JObject(m)
+}
+
+fn sse_frame(j: Json) -> bytes {
+    ("data: " + json.stringify(j) + "\n\n").to_bytes()
+}
+
+fn fire_webhook(url: string, payload: Json) {
+    spawn(fn() {
+        var h: Map<string, string> = Map.new();
+        h.insert("Content-Type", "application/json");
+        http.request_bytes("POST", url, json.stringify(payload).to_bytes(), h, 5000);
+    });
+}
+
+fn actor_loop(ch: Channel<Rec>, conn: sqlite.Conn, cfg: config.Config) {
+    var states: Map<string, State> = Map.new();
+    var subs: [Channel<bytes>] = [];
+    var running = true;
+    while (running) {
+        match (recv(
+    ch
+)) {
+            Option.None => {
+                running = false;
+            },
+            Option.Some(msg) => {
+                match (msg) {
+                    Rec.Report(s) => {
+                        let now = time.now();
+                        sqlite.exec(
+                            conn,
+                            "INSERT INTO results (name, ts, ok, latency, detail) VALUES (?1, ?2, ?3, ?4, ?5)",
+                            [s.name, to_string(now), if (s.ok) { "1" } else { "0" }, to_string(s.latency_ms), s.detail]
+                        );
+                        var changed = false;
+                        let st = match (get(
+                            states,
+                            s.name
+                        )) {
+                            Option.Some(prev) => {
+                                changed = prev.ok != s.ok;
+                                State { ok: s.ok, since_ms: if (changed) { now } else { prev.since_ms }, latency_ms: s.latency_ms, detail: s.detail, total: prev.total + 1, passed: prev.passed + if (s.ok) { 1 } else { 0 } }
+                            },
+                            Option.None => {
+                                changed = true;
+                                State { ok: s.ok, since_ms: now, latency_ms: s.latency_ms, detail: s.detail, total: 1, passed: if (s.ok) { 1 } else { 0 } }
+                            },
+                        };
+                        states.insert(s.name, st);
+                        let j = sample_json(s, st);
+                        // Broadcast to SSE subscribers; a dead one (closed
+                        // channel by its handler) is dropped.
+                        var keep: [Channel<bytes>] = [];
+                        for sub in subs {
+                            send(sub, sse_frame(j));
+                            keep.push(sub);
+                        }
+                        subs = keep;
+                        if (changed && cfg.webhook != "") {
+                            fire_webhook(cfg.webhook, j);
+                        }
+                    },
+                    Rec.Sse(sub) => {
+                        // Current snapshot first, then live.
+                        for name in states.keys() {
+                            match (get(states, name)) {
+                                Option.Some(st) => {
+                                    let s = Sample {
+                                        name: name,
+                                        ok: st.ok,
+                                        latency_ms: st.latency_ms,
+                                        detail: st.detail
+                                    };
+                                    send(sub, sse_frame(sample_json(s, st)));
+                                },
+                                Option.None => { },
+                            }
+                        }
+                        subs.push(sub);
+                    },
+                    Rec.Snapshot(reply) => {
+                        var arr: [Json] = [];
+                        for name in states.keys() {
+                            match (get(states, name)) {
+                                Option.Some(st) => {
+                                    let s = Sample {
+                                        name: name,
+                                        ok: st.ok,
+                                        latency_ms: st.latency_ms,
+                                        detail: st.detail
+                                    };
+                                    arr.push(sample_json(s, st));
+                                },
+                                Option.None => { },
+                            }
+                        }
+                        send(reply, json.stringify(Json.JArray(arr)));
+                    },
+                }
+            },
+        }
+    }
+}

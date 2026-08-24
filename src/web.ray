@@ -1,0 +1,59 @@
+// raywatch — the dashboard: one HTML page, an SSE stream, a JSON snapshot.
+import net/webserver;
+import recorder;
+
+const PAGE: string = `<!doctype html>
+<meta charset="utf-8">
+<title>raywatch</title>
+<style>
+  body { font: 14px/1.4 -apple-system, system-ui, sans-serif; margin: 2rem; background:#111; color:#eee; }
+  h1 { font-size: 1.2rem; letter-spacing: .06em; }
+  table { border-collapse: collapse; min-width: 40rem; }
+  td, th { padding: .45rem .8rem; border-bottom: 1px solid #333; text-align: left; }
+  .ok { color: #5f5; } .down { color: #f66; font-weight: bold; }
+  .lat { color: #aaa; } .up { color: #8cf; }
+</style>
+<h1>raywatch</h1>
+<table>
+  <thead><tr><th>check</th><th>estado</th><th>latencia</th><th>uptime</th><th>detalle</th></tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+<script>
+  const rows = {};
+  const tbody = document.getElementById("rows");
+  const es = new EventSource("/events");
+  es.onmessage = (ev) => {
+    const d = JSON.parse(ev.data);
+    let tr = rows[d.name];
+    if (!tr) { tr = document.createElement("tr"); rows[d.name] = tr; tbody.appendChild(tr); }
+    tr.innerHTML = "<td>" + d.name + "</td>"
+      + "<td class='" + (d.ok ? "ok'>UP" : "down'>DOWN") + "</td>"
+      + "<td class='lat'>" + d.latency_ms + " ms</td>"
+      + "<td class='up'>" + d.uptime_pct.toFixed(2) + "%</td>"
+      + "<td class='lat'>" + d.detail + "</td>";
+  };
+</script>
+`;
+
+pub fn handle(rec: Channel<recorder.Rec>, req: webserver.Request) -> webserver.Response {
+    if (req.path == "/") {
+        webserver.html_response(200, PAGE)
+    } else if (req.path == "/events") {
+        let sub: Channel<bytes> = Channel.bounded(64);
+        send(rec, recorder.Rec.Sse(sub));
+        var resp = webserver.stream_response(200, sub);
+        resp.headers.insert("Content-Type", "text/event-stream");
+        resp.headers.insert("Cache-Control", "no-cache");
+        resp
+    } else if (req.path == "/api/status") {
+        let reply: Channel<string> = Channel.bounded(1);
+        send(rec, recorder.Rec.Snapshot(reply));
+        let body = match (recv(reply)) {
+            Option.Some(s) => s,
+            Option.None => "[]",
+        };
+        webserver.json_response(body)
+    } else {
+        webserver.not_found()
+    }
+}

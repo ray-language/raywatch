@@ -1,0 +1,101 @@
+// raywatch — service monitor: scheduled checks, SQLite history, SSE dashboard.
+import std/fs;
+import std/time;
+import net/webserver;
+import config;
+import checks;
+import recorder;
+import web;
+
+fn usage() {
+    eprint("usage: raywatch [--config raywatch.toml]");
+    eprint("");
+    eprint("  checks: http | tcp | tls | redis | dns (name@server:port)");
+    eprint("  dashboard at http://<bind>:<port>/ (SSE live), /api/status (JSON)");
+}
+
+fn config_path(av: [string]) -> string {
+    var i = 0;
+    while (i + 1 < av.len()) {
+        if (av[i] == "--config") {
+            return av[i + 1];
+        }
+        i = i + 1;
+    }
+    "raywatch.toml"
+}
+
+// One fiber per check: the "does N sleeping fibers scale" experiment the
+// catalog asked for.
+pub fn start_checks(cfg: config.Config, rec: Channel<recorder.Rec>) {
+    for c in cfg.checks {
+        spawn(fn() {
+            while (true) {
+                let out = checks.run(c);
+                send(
+                    rec,
+                    recorder.Rec.Report(
+                        recorder.Sample {
+                            name: c.name,
+                            ok: out.ok,
+                            latency_ms: out.latency_ms,
+                            detail: out.detail
+                        }
+                    )
+                );
+                time.sleep(c.interval_ms);
+            }
+        });
+    }
+}
+
+fn main() -> int {
+    let av = args();
+    for a in av {
+        if (a == "--help" || a == "-h") {
+            usage();
+            return 0;
+        }
+    }
+    let src = match (fs.read_file(config_path(av))) {
+        Result.Ok(s) => s,
+        Result.Err(e) => {
+            eprint("raywatch: " + e);
+            usage();
+            return 1;
+        },
+    };
+    match (config.parse_config(
+    src
+)) {
+        Result.Err(e) => {
+            eprint("raywatch: " + e);
+            1
+        },
+        Result.Ok(cfg) => {
+            match (recorder.start(
+            cfg
+        )) {
+                Result.Err(e) => {
+                    eprint("raywatch: " + e);
+                    1
+                },
+                Result.Ok(rec) => {
+                    start_checks(cfg, rec);
+                    eprint(
+                        "raywatch: " + to_string(cfg.checks.len()) + " check(s), dashboard on http://" + cfg.bind + ":" + to_string(cfg.port) + "/"
+                    );
+                    match (webserver.serve_graceful(cfg.bind, cfg.port, 2000, fn(req: webserver.Request) -> webserver.Response {
+                    web.handle(rec, req)
+                })) {
+                        Result.Ok(n) => 0,
+                        Result.Err(e) => {
+                            eprint("raywatch: " + e);
+                            1
+                        },
+                    }
+                },
+            }
+        },
+    }
+}

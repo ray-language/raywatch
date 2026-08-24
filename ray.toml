@@ -1,0 +1,7 @@
+[package]
+name = "raywatch"
+version = "0.1.0"
+
+[dependencies]
+net = "path:../../raylang/packages/net"
+db = "path:../../raylang/packages/db"
