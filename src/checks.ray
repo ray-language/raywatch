@@ -1,11 +1,12 @@
 // raywatch — one probe per check type.
 //
-// tls: a successful rustls handshake already validates the chain AND the
-// dates, so "handshake ok" is the check — but days-to-expiry is impossible:
-// std/net does not expose the peer certificate (recorded finding).
-// dns: net/dns rides UDP, whose recv BLOCKS every fiber and has no timeout
-// (recorded finding) — a lost packet stalls the whole monitor, so use dns
-// checks against reliable resolvers only.
+// tls: the rustls handshake validates chain + dates, and since raylang M124
+// net.tls_peer_cert exposes the certificate — the check now reports
+// days-to-expiry (THE tls check every operator wants).
+// dns: bounded since raylang M121 (net/dns caps the wait at 5 s) — a lost
+// packet is an Err, not a stalled monitor.
+// tcp/tls connects are bounded too (tcp_connect_timeout, M122): a host
+// dropping SYNs fails within the check's timeout_ms, not the OS ~75 s.
 import std/net;
 import std/time;
 import net/http;
@@ -44,7 +45,7 @@ fn check_http(c: config.Check) -> Outcome {
 fn check_tcp(c: config.Check) -> Outcome {
     let t0 = time.monotonic();
     let (host, port) = config.host_port(c.target, 0);
-    match (net.tcp_connect(host, port)) {
+    match (net.tcp_connect_timeout(host, port, c.timeout_ms)) {
         Result.Ok(h) => {
             close(h);
             outcome(true, t0, "connected")
@@ -58,8 +59,17 @@ fn check_tls(c: config.Check) -> Outcome {
     let (host, port) = config.host_port(c.target, 443);
     match (net.tls_connect(host, port)) {
         Result.Ok(h) => {
+            let detail = match (net.tls_peer_cert(h)) {
+                Result.Ok(cert) => {
+                    let days = (cert.not_after_ms - time.now()) / 86400000;
+                    "handshake ok; cert expires in " + to_string(
+                        days
+                    ) + " days (" + cert.subject + ")"
+                },
+                Result.Err(e) => "handshake ok; cert unreadable: " + e,
+            };
             close(h);
-            outcome(true, t0, "handshake ok (chain + dates valid)")
+            outcome(true, t0, detail)
         },
         Result.Err(e) => outcome(false, t0, e),
     }
