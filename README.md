@@ -1,6 +1,6 @@
 # raywatch
 
-Monitor de servicios con **dashboard en vivo**, escrito en [raylang](https://github.com/roberto-ayala/raylang): checks programados (HTTP, TCP, TLS, Redis, DNS) — una fibra por check —, historia en SQLite, panel web con **SSE** (la tabla se actualiza sola), uptime %, y alertas por **webhook** cuando un servicio cambia de estado (no en cada fallo).
+Monitor de servicios con **dashboard en vivo**, escrito en [raylang](https://github.com/ray-language/raylang): checks programados (HTTP, TCP, TLS, Redis, DNS) — una fibra por check —, historia en SQLite, panel web con **SSE** (la tabla se actualiza sola), uptime %, y alertas por **webhook** cuando un servicio cambia de estado (no en cada fallo).
 
 ```text
 $ raywatch --config raywatch.toml
