@@ -33,7 +33,7 @@ type = "tls"                   # handshake rustls OK = cadena y fechas válidas
 target = "example.com:443"
 
 [check.dns]
-type = "dns"                   # ¡ojo!: UDP bloqueante, ver hallazgos
+type = "dns"                   # espera acotada a 5 s desde raylang M121
 target = "example.com@8.8.8.8:53"
 ```
 
@@ -59,24 +59,21 @@ target = "example.com@8.8.8.8:53"
 | Webhook JSON en cambios de estado | ✅ |
 | Binario nativo (SSE y SQLite incluidos) | ✅ |
 | Tests (E2E completo con webhook sink) | ✅ 1 |
-| Días-para-expirar del certificado TLS | ❌ bloqueado (ver hallazgos) |
+| Días-para-expirar del certificado TLS | ✅ (raylang M124: `tls_peer_cert`) |
 | Gráficas de latencia histórica, agrupación, silencios | 📋 v2 |
 
 ## Hallazgos de dogfood (necesidades confirmadas del lenguaje)
 
 Anotados en `raylang/IDEAS.md` §70:
 
-1. **No se puede leer el certificado del peer** — la predicción del catálogo:
-   `tls_connect` devuelve solo el handle. El handshake de rustls ya valida
-   cadena y fechas (por eso el check `tls` sirve), pero "expira en N días" —
-   EL check de TLS que todo el mundo quiere — es inexpresable. Superficie
-   candidata: `net.tls_peer_cert(h) -> {not_after, san, issuer}`.
-2. **`net/dns` hereda el UDP bloqueante** (§64): una consulta congela TODAS
-   las fibras del monitor mientras espera, y sin timeout de `recv_from` un
-   paquete perdido cuelga el proceso entero. Para un monitor es la diferencia
-   entre "check lento" y "monitor muerto".
-3. `tcp_connect` no tiene timeout de conexión (el del SO, ~75 s): un host que
-   descarta SYNs bloquea esa fibra mucho más que su `timeout_ms`.
+1. **[RESUELTO — raylang M124]** No se puede leer el certificado del peer:
+   `net.tls_peer_cert(h)` existe y el check `tls` reporta "cert expires in N
+   days (subject)".
+2. **[RESUELTO — raylang M121]** `net/dns` hereda el UDP bloqueante: la nota
+   resultó parcialmente rancia (la VM cede desde M20.11) y el hueco real —
+   el timeout — está cerrado: la espera de respuesta se acota a 5 s.
+3. **[RESUELTO — raylang M122]** `tcp_connect` sin timeout: el check `tcp`
+   usa `tcp_connect_timeout(host, port, timeout_ms)`.
 4. **Positivo**: fibra-por-check + actor + SSE + SQLite compone limpio y
    corre igual en VM y nativo; `stream_response` sirve SSE sin soporte
    dedicado; el webhook en fibra aparte no bloquea al recorder.
