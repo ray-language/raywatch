@@ -72,9 +72,7 @@ fn actor_loop(ch: Channel<Rec>, conn: sqlite.Conn, cfg: config.Config) {
     var subs: [Channel<bytes>] = [];
     var running = true;
     while (running) {
-        match (recv(
-    ch
-)) {
+        match (recv(ch)) {
             Option.None => {
                 running = false;
             },
@@ -85,20 +83,33 @@ fn actor_loop(ch: Channel<Rec>, conn: sqlite.Conn, cfg: config.Config) {
                         sqlite.exec(
                             conn,
                             "INSERT INTO results (name, ts, ok, latency, detail) VALUES (?1, ?2, ?3, ?4, ?5)",
-                            [s.name, to_string(now), if (s.ok) { "1" } else { "0" }, to_string(s.latency_ms), s.detail]
+                            [s.name, to_string(now), if (s.ok) {
+                                "1"
+                            } else {
+                                "0"
+                            }, to_string(s.latency_ms), s.detail]
                         );
                         var changed = false;
-                        let st = match (get(
-                            states,
-                            s.name
-                        )) {
+                        let st = match (get(states, s.name)) {
                             Option.Some(prev) => {
                                 changed = prev.ok != s.ok;
-                                State { ok: s.ok, since_ms: if (changed) { now } else { prev.since_ms }, latency_ms: s.latency_ms, detail: s.detail, total: prev.total + 1, passed: prev.passed + if (s.ok) { 1 } else { 0 } }
+                                State { ok: s.ok, since_ms: if (changed) {
+                                    now
+                                } else {
+                                    prev.since_ms
+                                }, latency_ms: s.latency_ms, detail: s.detail, total: prev.total + 1, passed: prev.passed + if (s.ok) {
+                                    1
+                                } else {
+                                    0
+                                } }
                             },
                             Option.None => {
                                 changed = true;
-                                State { ok: s.ok, since_ms: now, latency_ms: s.latency_ms, detail: s.detail, total: 1, passed: if (s.ok) { 1 } else { 0 } }
+                                State { ok: s.ok, since_ms: now, latency_ms: s.latency_ms, detail: s.detail, total: 1, passed: if (s.ok) {
+                                    1
+                                } else {
+                                    0
+                                } }
                             },
                         };
                         states.insert(s.name, st);

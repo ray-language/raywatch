@@ -62,9 +62,11 @@ fn check_tls(c: config.Check) -> Outcome {
             let detail = match (net.tls_peer_cert(h)) {
                 Result.Ok(cert) => {
                     let days = (cert.not_after_ms - time.now()) / 86400000;
-                    "handshake ok; cert expires in " + to_string(
-                        days
-                    ) + " days (" + cert.subject + ")"
+                    "handshake ok; cert expires in "
+                        + to_string(days)
+                        + " days ("
+                        + cert.subject
+                        + ")"
                 },
                 Result.Err(e) => "handshake ok; cert unreadable: " + e,
             };
