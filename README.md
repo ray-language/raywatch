@@ -13,7 +13,11 @@ $ curl -N localhost:8090/events        # SSE: un evento JSON por muestra
 data: {"detail":"connected","latency_ms":1,"name":"ssh","ok":true,…}
 ```
 
-## Config (tablas con nombre, como raygate)
+## Config (tablas con nombre o `[[check]]`, como raygate)
+
+Cada check es una tabla con nombre (`[check.web]`) o una entrada de un array de
+tablas `[[check]]` con una clave `name` opcional (si falta, `check<N>`); las dos
+formas se pueden mezclar y los nombres no pueden repetirse.
 
 ```toml
 [server]
@@ -45,7 +49,12 @@ target = "example.com@8.8.8.8:53"
   vigente + uptime, hace fan-out a los suscriptores SSE (cada `/events` es un
   `stream_response` con su canal), y dispara el webhook en fibra aparte al
   CAMBIAR el estado.
-- Dashboard: una página HTML con `EventSource` — cero build, cero deps.
+- Dashboard: una página HTML con `EventSource` — cero build, cero deps. Las
+  celdas se rellenan con `textContent`: el detalle viene de los servicios
+  sondeados y nunca se interpreta como HTML.
+- Un suscriptor SSE que se fue o que no lee no frena al recorder: se le envía
+  con `try_send`, y si el canal está cerrado o lleno se le descarta y se
+  cierra su stream (el `EventSource` reconecta y recibe la foto actual).
 - Verificado E2E: upstream vivo/muerto, snapshot JSON, página, 3 webhooks al
   primer estado, SQLite poblado; y en nativo con SSE en vivo por curl.
 
@@ -58,7 +67,7 @@ target = "example.com@8.8.8.8:53"
 | Dashboard SSE en vivo + `/api/status` JSON | ✅ |
 | Webhook JSON en cambios de estado | ✅ |
 | Binario nativo (SSE y SQLite incluidos) | ✅ |
-| Tests (E2E completo con webhook sink) | ✅ 1 |
+| Tests (E2E completo con webhook sink, config, recorder) | ✅ 3 |
 | Días-para-expirar del certificado TLS | ✅ (raylang M124: `tls_peer_cert`) |
 | Gráficas de latencia histórica, agrupación, silencios | 📋 v2 |
 
