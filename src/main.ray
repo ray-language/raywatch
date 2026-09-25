@@ -65,17 +65,13 @@ fn main() -> int {
             return 1;
         },
     };
-    match (config.parse_config(
-    src
-)) {
+    match (config.parse_config(src)) {
         Result.Err(e) => {
             eprint("raywatch: " + e);
             1
         },
         Result.Ok(cfg) => {
-            match (recorder.start(
-            cfg
-        )) {
+            match (recorder.start(cfg)) {
                 Result.Err(e) => {
                     eprint("raywatch: " + e);
                     1
@@ -83,11 +79,17 @@ fn main() -> int {
                 Result.Ok(rec) => {
                     start_checks(cfg, rec);
                     eprint(
-                        "raywatch: " + to_string(cfg.checks.len()) + " check(s), dashboard on http://" + cfg.bind + ":" + to_string(cfg.port) + "/"
+                        "raywatch: "
+                            + to_string(cfg.checks.len())
+                            + " check(s), dashboard on http://"
+                            + cfg.bind
+                            + ":"
+                            + to_string(cfg.port)
+                            + "/"
                     );
                     match (webserver.serve_graceful(cfg.bind, cfg.port, 2000, fn(req: webserver.Request) -> webserver.Response {
-                    web.handle(rec, req)
-                })) {
+                        web.handle(rec, req)
+                    })) {
                         Result.Ok(n) => 0,
                         Result.Err(e) => {
                             eprint("raywatch: " + e);

@@ -3,5 +3,5 @@ name = "raywatch"
 version = "0.1.0"
 
 [dependencies]
-net = "git+https://github.com/ray-language/net@v0.1.0"
-db = "git+https://github.com/ray-language/db@v0.1.0"
+net = "^0.3.3"
+db = "^0.1.0"
