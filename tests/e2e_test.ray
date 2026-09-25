@@ -1,5 +1,5 @@
 // End-to-end: a healthy upstream, a dead port, a webhook sink and the
-// dashboard, all live in fibers. One @test (zombie listeners).
+// dashboard, all live in fibers; plus the config and the recorder on their own.
 import std/fs;
 import std/time;
 import std/json;
@@ -21,7 +21,7 @@ const CFG: string = `
 [server]
 bind = "127.0.0.1"
 port = 19003
-db = "/tmp/raywatch_e2e.db"
+db = "DB_PATH"
 webhook = "http://127.0.0.1:19002/alert"
 
 [check.vivo]
@@ -45,9 +45,17 @@ fn upstream(req: webserver.Request) -> webserver.Response {
     webserver.ok("ok")
 }
 
+fn temp_dir(prefix: string) -> string {
+    match (fs.make_temp_dir(prefix)) {
+        Result.Ok(d) => d,
+        Result.Err(e) => panic(e),
+    }
+}
+
 @test
 fn monitor_end_to_end() {
-    fs.remove_file("/tmp/raywatch_e2e.db");
+    let dir = temp_dir("raywatch_e2e");
+    let db_path = dir + "/raywatch.db";
     // Webhook sink: records the alert bodies it receives.
     let hooks: Channel<string> = Channel.bounded(16);
     spawn(fn() {
@@ -64,7 +72,7 @@ fn monitor_end_to_end() {
     spawn(fn() {
         webserver.serve("127.0.0.1", UP_PORT, upstream);
     });
-    let cfg = match (config.parse_config(CFG)) {
+    let cfg = match (config.parse_config(CFG.replace("DB_PATH", db_path))) {
         Result.Ok(c) => c,
         Result.Err(e) => panic(e),
     };
@@ -139,22 +147,15 @@ fn monitor_end_to_end() {
     // Webhooks fired for the initial state changes (first report of each
     // check counts as a change).
     var alerts = 0;
-    var draining = true;
-    while (draining) {
-        let chans = [hooks];
-        // recv would block: rely on the buffered backlog only.
-        if (alerts >= 3) {
-            draining = false;
-        } else {
-            match (recv(hooks)) {
-                Option.Some(body) => {
-                    assert(body.contains("\"name\""));
-                    alerts = alerts + 1;
-                },
-                Option.None => {
-                    draining = false;
-                },
-            }
+    while (alerts < 3) {
+        match (recv(hooks)) {
+            Option.Some(body) => {
+                assert(body.contains("\"name\""));
+                alerts = alerts + 1;
+            },
+            Option.None => {
+                break;
+            },
         }
     }
     assert_eq(alerts, 3);
@@ -164,5 +165,99 @@ fn monitor_end_to_end() {
         Result.Ok(r) => assert_eq(r.status, 200),
         Result.Err(e) => panic(e),
     }
-    assert(fs.exists("/tmp/raywatch_e2e.db"));
+    assert(fs.exists(db_path));
+    let _ = fs.remove_all(dir);
+}
+
+@test
+fn config_accepts_arrays_of_tables_mixed_with_named_tables() {
+    let src = `
+[[check]]
+name = "web"
+type = "http"
+target = "http://127.0.0.1:1/"
+
+[[check]]
+type = "tcp"
+target = "127.0.0.1:22"
+
+[check.cache]
+type = "redis"
+target = "127.0.0.1:6379"
+`;
+    match (config.parse_config(src)) {
+        Result.Err(e) => panic(e),
+        Result.Ok(c) => {
+            assert_eq(c.checks.len(), 3);
+            assert_eq(c.checks[0].name, "web");
+            assert_eq(c.checks[1].name, "check1");
+            assert_eq(c.checks[1].kind, "tcp");
+            assert_eq(c.checks[2].name, "cache");
+        },
+    }
+    let twice = `
+[[check]]
+name = "web"
+type = "tcp"
+target = "h:1"
+
+[check.web]
+type = "tcp"
+target = "h:2"
+`;
+    match (config.parse_config(twice)) {
+        Result.Err(e) => assert(e.contains("defined twice")),
+        Result.Ok(c) => panic("expected error: duplicate check name"),
+    }
+    let (host, port) = config.host_port("h:81", 80);
+    assert_eq(host, "h");
+    assert_eq(port, 81);
+    let (bare, fallback) = config.host_port("h", 80);
+    assert_eq(bare, "h");
+    assert_eq(fallback, 80);
+    let (_, bad) = config.host_port("h:x", 80);
+    assert_eq(bad, 80);
+}
+
+// A subscriber that is gone (closed) or never reads (full) must not stop the
+// recorder: it is dropped and the actor keeps answering.
+@test
+fn recorder_drops_dead_and_stuck_subscribers() {
+    let dir = temp_dir("raywatch_rec");
+    let cfg = match (config.parse_config(CFG.replace("DB_PATH", dir + "/raywatch.db"))) {
+        Result.Ok(c) => c,
+        Result.Err(e) => panic(e),
+    };
+    let rec = match (recorder.start(cfg)) {
+        Result.Ok(r) => r,
+        Result.Err(e) => panic(e),
+    };
+    let gone: Channel<bytes> = Channel.bounded(1);
+    let stuck: Channel<bytes> = Channel.bounded(1);
+    send(rec, recorder.Rec.Sse(gone));
+    send(rec, recorder.Rec.Sse(stuck));
+    close(gone);
+    var i = 0;
+    while (i < 5) {
+        send(
+            rec,
+            recorder.Rec.Report(
+                recorder.Sample { name: "x", ok: i % 2 == 0, latency_ms: i, detail: "<b>${i}</b>" }
+            )
+        );
+        i = i + 1;
+    }
+    let reply: Channel<string> = Channel.bounded(1);
+    send(rec, recorder.Rec.Snapshot(reply));
+    match (select_timeout([reply], 2000)) {
+        Option.Some(_) => {
+            let snapshot = recv(reply).unwrap_or("");
+            assert(snapshot.contains("\"latency_ms\":4"));
+        },
+        Option.None => panic("the recorder stopped answering"),
+    }
+    // The stuck subscriber got the first frame and then its stream was closed.
+    assert(recv(stuck).is_some());
+    assert(recv(stuck).is_none());
+    let _ = fs.remove_all(dir);
 }

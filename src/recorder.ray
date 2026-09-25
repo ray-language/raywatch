@@ -70,11 +70,10 @@ fn fire_webhook(url: string, payload: Json) {
 fn actor_loop(ch: Channel<Rec>, conn: sqlite.Conn, cfg: config.Config) {
     var states: Map<string, State> = Map.new();
     var subs: [Channel<bytes>] = [];
-    var running = true;
-    while (running) {
+    while (true) {
         match (recv(ch)) {
             Option.None => {
-                running = false;
+                break;
             },
             Option.Some(msg) => {
                 match (msg) {
@@ -114,12 +113,17 @@ fn actor_loop(ch: Channel<Rec>, conn: sqlite.Conn, cfg: config.Config) {
                         };
                         states.insert(s.name, st);
                         let j = sample_json(s, st);
-                        // Broadcast to SSE subscribers; a dead one (closed
-                        // channel by its handler) is dropped.
+                        // Broadcast to SSE subscribers without ever blocking the
+                        // actor: one that is gone (closed channel) or 64 frames
+                        // behind (full) is dropped and its stream closed — the
+                        // browser's EventSource reconnects and gets a snapshot.
                         var keep: [Channel<bytes>] = [];
                         for sub in subs {
-                            send(sub, sse_frame(j));
-                            keep.push(sub);
+                            if (try_send(sub, sse_frame(j))) {
+                                keep.push(sub);
+                            } else {
+                                close(sub);
+                            }
                         }
                         subs = keep;
                         if (changed && cfg.webhook != "") {

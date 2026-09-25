@@ -28,7 +28,7 @@ type = "redis"
 target = "127.0.0.1:6379"
 interval_ms = 10000
 
-# dns rides blocking UDP (see README): reliable resolvers only.
+# dns waits are capped at 5 s (net/dns), a lost packet is a failed check.
 [check.dns]
 type = "dns"
 target = "example.com@8.8.8.8:53"

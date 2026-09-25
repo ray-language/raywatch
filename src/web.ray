@@ -22,15 +22,24 @@ const PAGE: string = `<!doctype html>
   const rows = {};
   const tbody = document.getElementById("rows");
   const es = new EventSource("/events");
+  // Cells are filled with textContent, never innerHTML: the detail carries text from the
+  // probed services (error messages, certificate subjects) and must not become markup.
+  const cell = (tr, cls, text) => {
+    const td = document.createElement("td");
+    if (cls) td.className = cls;
+    td.textContent = text;
+    tr.appendChild(td);
+  };
   es.onmessage = (ev) => {
     const d = JSON.parse(ev.data);
     let tr = rows[d.name];
     if (!tr) { tr = document.createElement("tr"); rows[d.name] = tr; tbody.appendChild(tr); }
-    tr.innerHTML = "<td>" + d.name + "</td>"
-      + "<td class='" + (d.ok ? "ok'>UP" : "down'>DOWN") + "</td>"
-      + "<td class='lat'>" + d.latency_ms + " ms</td>"
-      + "<td class='up'>" + d.uptime_pct.toFixed(2) + "%</td>"
-      + "<td class='lat'>" + d.detail + "</td>";
+    tr.replaceChildren();
+    cell(tr, "", d.name);
+    cell(tr, d.ok ? "ok" : "down", d.ok ? "UP" : "DOWN");
+    cell(tr, "lat", d.latency_ms + " ms");
+    cell(tr, "up", d.uptime_pct.toFixed(2) + "%");
+    cell(tr, "lat", d.detail);
   };
 </script>
 `;
