@@ -153,9 +153,7 @@ fn monitor_end_to_end() {
                 assert(body.contains("\"name\""));
                 alerts = alerts + 1;
             },
-            Option.None => {
-                break;
-            },
+            Option.None => break,
         }
     }
     assert_eq(alerts, 3);

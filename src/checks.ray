@@ -6,7 +6,9 @@
 // dns: bounded since raylang M121 (net/dns caps the wait at 5 s) — a lost
 // packet is an Err, not a stalled monitor.
 // tcp/tls connects are bounded too (tcp_connect_timeout, M122): a host
-// dropping SYNs fails within the check's timeout_ms, not the OS ~75 s.
+// dropping SYNs fails within the check's timeout_ms, not the OS ~75 s. Since
+// raylang 1.27.13 the dial parks only its own fiber, so a slow host no longer
+// stalls the other checks or the dashboard while it times out.
 import std/net;
 import std/time;
 import net/http;
