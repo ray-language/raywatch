@@ -1,7 +1,8 @@
 [package]
 name = "raywatch"
 version = "0.1.0"
+raylang = "1.27.13"
 
 [dependencies]
-net = "^0.3.3"
-db = "^0.1.0"
+net = "^0.3.7"
+db = "^0.1.1"
